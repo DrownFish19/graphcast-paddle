@@ -1,8 +1,6 @@
 import vtk
 
-from data.graph import TriangularMesh
-from data.graph import get_hierarchy_of_triangular_meshes_for_sphere
-from data.graph import get_icosahedron
+import graphtype
 
 
 def draw_vtk():
@@ -84,6 +82,6 @@ def draw_vtk_define(polyhedron):
     renderWindowInteractor.Start()
 
 
-icosahedron = get_icosahedron()
-polyhedrons = get_hierarchy_of_triangular_meshes_for_sphere(6)
+icosahedron = graphtype.get_icosahedron()
+polyhedrons = graphtype.get_hierarchy_of_triangular_meshes_for_sphere(6)
 draw_vtk_define(polyhedrons[5])

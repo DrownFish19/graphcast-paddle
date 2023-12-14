@@ -13,13 +13,12 @@
 # limitations under the License.
 """Utilities for building models."""
 
-from typing import Mapping
 from typing import Optional
 from typing import Tuple
 
 import numpy as np
+import scipy
 import xarray
-from scipy.spatial import transform
 
 
 def get_graph_spatial_features(
@@ -344,20 +343,22 @@ def get_rotation_matrices_to_local_coordinates(
         # to get the point with zero latitude.
         polar_rotation = -reference_theta + np.pi / 2
 
-        return transform.Rotation.from_euler(
+        return scipy.spatial.transform.Rotation.from_euler(
             "zy", np.stack([azimuthal_rotation, polar_rotation], axis=1)
         ).as_matrix()
     elif rotate_longitude:
         # Just like the previous case, but applying only the azimuthal rotation.
         azimuthal_rotation = -reference_phi
-        return transform.Rotation.from_euler("z", -reference_phi).as_matrix()
+        return scipy.spatial.transform.Rotation.from_euler(
+            "z", -reference_phi
+        ).as_matrix()
     elif rotate_latitude:
         # Just like the first case, but after doing the polar rotation, undoing
         # the azimuthal rotation.
         azimuthal_rotation = -reference_phi
         polar_rotation = -reference_theta + np.pi / 2
 
-        return transform.Rotation.from_euler(
+        return scipy.spatial.transform.Rotation.from_euler(
             "zyz",
             np.stack([azimuthal_rotation, polar_rotation, -azimuthal_rotation], axis=1),
         ).as_matrix()
@@ -482,15 +483,16 @@ def get_bipartite_graph_spatial_features(
 
     if add_relative_positions:
 
-        relative_position = get_bipartite_relative_position_in_receiver_local_coordinates(  # pylint: disable=line-too-long
-            senders_node_phi=senders_node_phi,
-            senders_node_theta=senders_node_theta,
-            receivers_node_phi=receivers_node_phi,
-            receivers_node_theta=receivers_node_theta,
-            senders=senders,
-            receivers=receivers,
-            latitude_local_coordinates=relative_latitude_local_coordinates,
-            longitude_local_coordinates=relative_longitude_local_coordinates,
+        relative_position = (
+            get_bipartite_relative_position_in_receiver_local_coordinates(
+                senders_node_theta=senders_node_theta,
+                receivers_node_phi=receivers_node_phi,
+                receivers_node_theta=receivers_node_theta,
+                senders=senders,
+                receivers=receivers,
+                latitude_local_coordinates=relative_latitude_local_coordinates,
+                longitude_local_coordinates=relative_longitude_local_coordinates,
+            )
         )
 
         # Note this is L2 distance in 3d space, rather than geodesic distance.

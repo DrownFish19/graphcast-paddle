@@ -15,8 +15,12 @@ import itertools
 import typing
 
 import numpy as np
+import paddle
 import scipy
 import trimesh
+import xarray
+
+import datasets
 import utils
 
 
@@ -104,8 +108,8 @@ class GraphGridMesh(object):
 
             self.init_mesh_properties()
             self._init_grid_properties(
-                grid_lat=np.arange(-90.0, 90.0, config.resolution),
-                grid_lon=np.arange(0.0, 359.0, config.resolution),
+                grid_lat=np.arange(-90.0, 90.0 + config.resolution, config.resolution),
+                grid_lon=np.arange(0.0, 360.0, config.resolution),
             )
             self._grid2mesh_graph_structure = self._init_grid2mesh_graph()
             self._mesh_graph_structure = self._init_mesh_graph()
@@ -165,7 +169,7 @@ class GraphGridMesh(object):
         self._grid_lat = grid_lat.astype(np.float32)
         self._grid_lon = grid_lon.astype(np.float32)
         # Initialized the counters.
-        self._num_grid_nodes = grid_lat.shape[0] * grid_lon.shape[0]
+        self.grid_num_nodes = grid_lat.shape[0] * grid_lon.shape[0]
 
         # Initialize lat and lon for the grid.
         grid_nodes_lon, grid_nodes_lat = np.meshgrid(grid_lon, grid_lat)
@@ -206,12 +210,11 @@ class GraphGridMesh(object):
             **self._spatial_features_kwargs,
         )
 
-        self.grid_num_nodes = len(senders)
-        self.grid_node_feat = senders_node_features
+        self.grid_node_feat = np.expand_dims(senders_node_features, axis=1)
 
         self.grid2mesh_src_index = senders
         self.grid2mesh_dst_index = receivers
-        self.grid2mesh_edge_feat = edge_features
+        self.grid2mesh_edge_feat = np.expand_dims(edge_features, axis=1)
         self.grid2mesh_num_edges = len(edge_features)
 
     def _init_mesh_graph(self):
@@ -231,10 +234,10 @@ class GraphGridMesh(object):
             **self._spatial_features_kwargs,
         )
 
-        self.mesh_node_feat = node_features
+        self.mesh_node_feat = np.expand_dims(node_features, axis=1)
         self.mesh2mesh_src_index = senders
         self.mesh2mesh_dst_index = receivers
-        self.mesh_edge_feat = edge_features
+        self.mesh_edge_feat = np.expand_dims(edge_features, axis=1)
         self.mesh_num_edges = len(edge_features)
 
     def _init_mesh2grid_graph(self):
@@ -267,7 +270,7 @@ class GraphGridMesh(object):
 
         self.mesh2grid_src_index = senders
         self.mesh2grid_dst_index = receivers
-        self.mesh2grid_edge_feat = edge_features
+        self.mesh2grid_edge_feat = np.expand_dims(edge_features, axis=1)
         self.mesh2grid_num_edges = len(edge_features)
 
     @staticmethod
@@ -277,6 +280,29 @@ class GraphGridMesh(object):
             mesh.vertices[senders] - mesh.vertices[receivers], axis=-1
         )
         return edge_distances.max()
+
+    def grid_node_outputs_to_prediction(
+        self,
+        grid_node_outputs: np.ndarray,
+        targets_template: xarray.Dataset,
+    ) -> xarray.Dataset:
+        """[num_grid_nodes, batch, num_outputs] -> xarray."""
+        # numpy array with shape [lat_lon_node, batch, channels]
+        # to xarray `DataArray` (batch, lat, lon, channels)
+        assert self._grid_lat is not None and self._grid_lon is not None
+        grid_shape = (self._grid_lat.shape[0], self._grid_lon.shape[0])
+        grid_outputs_lat_lon_leading = grid_node_outputs.reshape(
+            grid_shape + grid_node_outputs.shape[1:]
+        )
+        dims = ("lat", "lon", "batch", "channels")
+        grid_xarray_lat_lon_leading = xarray.DataArray(
+            data=grid_outputs_lat_lon_leading, dims=dims
+        )
+        grid_xarray = utils.restore_leading_axes(grid_xarray_lat_lon_leading)
+
+        # xarray `DataArray` (batch, lat, lon, channels)
+        # to xarray `Dataset` (batch, one time step, lat, lon, level, multiple vars)
+        return datasets.stacked_to_dataset(grid_xarray.variable, targets_template)
 
 
 class TriangularMesh(typing.NamedTuple):
@@ -489,7 +515,7 @@ def radius_query_indices(
     grid_latitude: np.ndarray,
     grid_longitude: np.ndarray,
     mesh: TriangularMesh,
-    radius: float
+    radius: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Returns mesh-grid edge indices for radius query.
 
@@ -582,10 +608,59 @@ def in_mesh_triangle_indices(
     return grid_edge_indices, mesh_edge_indices
 
 
-if __name__ == "__main__":
-    from train_args import TrainingArguments
+def convert_np_to_tensor(graph: GraphGridMesh):
+    graph.mesh2mesh_src_index = paddle.to_tensor(
+        graph.mesh2mesh_src_index, dtype=paddle.int64
+    )
+    graph.mesh2mesh_dst_index = paddle.to_tensor(
+        graph.mesh2mesh_dst_index, dtype=paddle.int64
+    )
+    graph.grid2mesh_src_index = paddle.to_tensor(
+        graph.grid2mesh_src_index, dtype=paddle.int64
+    )
+    graph.grid2mesh_dst_index = paddle.to_tensor(
+        graph.grid2mesh_dst_index, dtype=paddle.int64
+    )
+    graph.mesh2grid_src_index = paddle.to_tensor(
+        graph.mesh2grid_src_index, dtype=paddle.int64
+    )
+    graph.mesh2grid_dst_index = paddle.to_tensor(
+        graph.mesh2grid_dst_index, dtype=paddle.int64
+    )
+    graph.grid_node_feat = paddle.to_tensor(
+        graph.grid_node_feat, dtype=paddle.get_default_dtype()
+    )
+    graph.mesh_node_feat = paddle.to_tensor(
+        graph.mesh_node_feat, dtype=paddle.get_default_dtype()
+    )
+    graph.mesh_edge_feat = paddle.to_tensor(
+        graph.mesh_edge_feat, dtype=paddle.get_default_dtype()
+    )
+    graph.grid2mesh_edge_feat = paddle.to_tensor(
+        graph.grid2mesh_edge_feat, dtype=paddle.get_default_dtype()
+    )
+    graph.mesh2grid_edge_feat = paddle.to_tensor(
+        graph.mesh2grid_edge_feat, dtype=paddle.get_default_dtype()
+    )
+    return graph
 
-    config = TrainingArguments()
-    GraphGridMesh(config=config)
-    # all_mesh = get_hierarchy_of_triangular_meshes_for_sphere(6)
-    print()
+
+if __name__ == "__main__":
+    import json
+    import os
+    import pickle
+
+    import args
+
+    with open("config/GraphCast_small.json", "r") as f:
+        config = args.TrainingArguments(**json.load(f))
+    graph = GraphGridMesh(config=config)
+
+    graph_template_path = os.path.join(
+        "data",
+        "template_graph",
+        f"{config.type}.pkl",
+    )
+    with open(graph_template_path, "wb") as f:
+        pickle.dump(graph, f)
+    print(graph)

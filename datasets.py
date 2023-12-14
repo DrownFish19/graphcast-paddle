@@ -1,14 +1,15 @@
+import copy
+import os
+import pickle
+import typing
+
 import numpy as np
 import paddle
 import pandas as pd
 import xarray
-from data_var import GENERATED_FORCING_VARS
-from data_var import TASK_13_forcing_variables
-from data_var import TASK_13_input_variables
-from data_var import TASK_13_target_variables
-from data_var import TASK_forcing_variables
-from data_var import TASK_input_variables
-from data_var import TASK_target_variables
+
+import args
+import graphtype
 
 _SEC_PER_HOUR = 3600
 _HOUR_PER_DAY = 24
@@ -212,15 +213,91 @@ def dataset_to_stacked(
     )
 
 
+def stacked_to_dataset(
+    stacked_array: xarray.Variable,
+    template_dataset: xarray.Dataset,
+    preserved_dims: typing.Tuple[str, ...] = ("batch", "lat", "lon"),
+) -> xarray.Dataset:
+    """The inverse of dataset_to_stacked.
+
+    Requires a template dataset to demonstrate the variables/shapes/coordinates
+    required.
+    All variables must have preserved_dims dimensions.
+
+    Args:
+      stacked_array: Data in BHWC layout, encoded the same as dataset_to_stacked
+        would if it was asked to encode `template_dataset`.
+      template_dataset: A template Dataset (or other mapping of DataArrays)
+        demonstrating the shape of output required (variables, shapes,
+        coordinates etc).
+      preserved_dims: dimensions from the target_template that were not folded in
+        the predictions channels. The preserved_dims need to be a subset of the
+        dims of all the variables of template_dataset.
+
+    Returns:
+      An xarray.Dataset (or other mapping of DataArrays) with the same shape and
+      type as template_dataset.
+    """
+    unstack_from_channels_sizes = {}
+    var_names = sorted(template_dataset.keys())
+    for name in var_names:
+        template_var = template_dataset[name]
+        if not all(dim in template_var.dims for dim in preserved_dims):
+            raise ValueError(
+                f"stacked_to_dataset requires all Variables to have {preserved_dims} "
+                f"dimensions, but found only {template_var.dims}."
+            )
+        unstack_from_channels_sizes[name] = {
+            dim: size
+            for dim, size in template_var.sizes.items()
+            if dim not in preserved_dims
+        }
+
+    channels = {
+        name: np.prod(list(unstack_sizes.values()), dtype=np.int64)
+        for name, unstack_sizes in unstack_from_channels_sizes.items()
+    }
+    total_expected_channels = sum(channels.values())
+    found_channels = stacked_array.sizes["channels"]
+    if total_expected_channels != found_channels:
+        raise ValueError(
+            f"Expected {total_expected_channels} channels but found "
+            f"{found_channels}, when trying to convert a stacked array of shape "
+            f"{stacked_array.sizes} to a dataset of shape {template_dataset}."
+        )
+
+    data_vars = {}
+    index = 0
+    for name in var_names:
+        template_var = template_dataset[name]
+        var = stacked_array.isel({"channels": slice(index, index + channels[name])})
+        index += channels[name]
+        var = var.unstack({"channels": unstack_from_channels_sizes[name]})
+        var = var.transpose(*template_var.dims)
+        data_vars[name] = xarray.DataArray(
+            data=var,
+            coords=template_var.coords,
+            # This might not always be the same as the name it's keyed under; it
+            # will refer to the original variable name, whereas the key might be
+            # some alias e.g. temperature_850 under which it should be logged:
+            name=template_var.name,
+        )
+    return type(template_dataset)(
+        data_vars
+    )  # pytype:disable=not-callable,wrong-arg-count
+
+
 class ERA5Data(paddle.io.Dataset):
     """
-    This class is used to process ERA5 re-analyze data, and is used to generate the dataset generator supported by
+    This class is used to process ERA5 re-analyze data,
+    and is used to generate the dataset generator supported by
     MindSpore. This class inherits the Data class.
 
     Args:
         data_params (dict): dataset-related configuration of the model.
-        run_mode (str, optional): whether the dataset is used for training, evaluation or testing. Supports [“train”,
-            “test”, “valid”]. Default: 'train'.
+        run_mode (str, optional): whether the dataset is used for training,
+        evaluation or testing. Supports [“train”,“test”, “valid”].
+        Default: 'train'.
 
     Supported Platforms:
         ``Ascend`` ``GPU``
@@ -239,17 +316,24 @@ class ERA5Data(paddle.io.Dataset):
     #  data_frequency, patch/patch_size
     def __init__(self, config, data_type="train"):
         super().__init__()
+        if config.type == "graphcast":
+            self.input_variables = args.TASK_input_variables
+            self.forcing_variables = args.TASK_forcing_variables
+            self.target_variables = args.TASK_target_variables
+            self.level_variables = args.PRESSURE_LEVELS[37]
+        elif config.type == "graphcast_small":
+            self.input_variables = args.TASK_13_input_variables
+            self.forcing_variables = args.TASK_13_forcing_variables
+            self.target_variables = args.TASK_13_target_variables
+            self.level_variables = args.PRESSURE_LEVELS[13]
+        elif config.type == "graphcast_operational":
+            self.input_variables = args.TASK_13_PRECIP_OUT_input_variables
+            self.forcing_variables = args.TASK_13_PRECIP_OUT_forcing_variables
+            self.target_variables = args.TASK_13_PRECIP_OUT_target_variables
+            self.level_variables = args.PRESSURE_LEVELS[13]
+
+        # 数据
         nc_dataset = xarray.open_dataset(config.data_path)
-
-        if config.level == 37:
-            input_variables = TASK_input_variables
-            forcing_variables = TASK_forcing_variables
-            target_variables = TASK_target_variables
-
-        elif config.level == 13:
-            input_variables = TASK_13_input_variables
-            forcing_variables = TASK_13_forcing_variables
-            target_variables = TASK_13_target_variables
 
         longitude_offsets = nc_dataset.coords["lon"].data
         second_since_epoch = (
@@ -277,40 +361,103 @@ class ERA5Data(paddle.io.Dataset):
             nc_dataset, input_duration="12h", target_lead_times="6h"
         )
 
-        inputs = inputs[list(input_variables)]
+        # 统计数据
+        stddev_data = xarray.open_dataset(config.stddev_path).sel(
+            level=list(self.level_variables)
+        )
+        stddev_diffs_data = xarray.open_dataset(config.stddev_diffs_path).sel(
+            level=list(self.level_variables)
+        )
+        mean_data = xarray.open_dataset(config.mean_path).sel(
+            level=list(self.level_variables)
+        )
+
+        missing_variables = set(self.target_variables) - set(self.input_variables)
+        exist_variables = set(self.target_variables) - missing_variables
+        targets_stddev = stddev_diffs_data[list(exist_variables)]
+        target_mean = inputs[list(exist_variables)].isel(time=-1)
+        if missing_variables:
+            targets_stddev.update({var: stddev_data[var] for var in missing_variables})
+            target_mean.update(
+                {var: mean_data.variables[var] for var in missing_variables}
+            )
+
+        stacked_targets_stddev = dataset_to_stacked(targets_stddev, preserved_dims=())
+        stacked_targets_mean = dataset_to_stacked(target_mean)
+        stacked_targets_mean = stacked_targets_mean.transpose("lat", "lon", ...)
+
         # The forcing uses the same time coordinates as the target.
-        forcings = targets[list(forcing_variables)]
-        targets = targets[list(target_variables)]
+        inputs = inputs[list(self.input_variables)]
+        forcings = targets[list(self.forcing_variables)]
+        targets = targets[list(self.target_variables)]
+        inputs = self.normalize(inputs, stddev_data, mean_data)
+        forcings = self.normalize(forcings, stddev_data, mean_data)
+
+        self.targets_template = targets
 
         stacked_inputs = dataset_to_stacked(inputs)
         stacked_forcings = dataset_to_stacked(forcings)
+        stacked_targets = dataset_to_stacked(targets)
         stacked_inputs = xarray.concat(
             [stacked_inputs, stacked_forcings], dim="channels"
         )
+
         stacked_inputs = stacked_inputs.transpose("lat", "lon", ...)
+        stacked_targets = stacked_targets.transpose("lat", "lon", ...)
 
         # 此处指定input数据为12h数据，target数据为6h数据
         # TODO:处理完整数据集进行训练，处理过程同本函数处理过程
-        self.input_data = {}
-        self.target_data = {}
+        lat_dim, lon_dim, batch_dim, feat_dim = stacked_inputs.shape
+        stacked_inputs = stacked_inputs.data.reshape(lat_dim * lon_dim, batch_dim, -1)
+        stacked_targets = stacked_targets.data.reshape(lat_dim * lon_dim, batch_dim, -1)
+        self.stacked_targets_stddev = stacked_targets_stddev.data
+        self.stacked_targets_mean = stacked_targets_mean.data.reshape(
+            lat_dim * lon_dim, batch_dim, -1
+        )
 
-        # inputs, targets = extract_input_target_times(nc_dataset,input_duration="12h", target_lead_times="6h")
+        self.input_data = []
+        self.target_data = []
 
-        for input_var in TASK_input_variables:
-            var_dims = nc_dataset.variables[input_var].dimensions
-            time_idx = -1
-            for idx, dim_name in enumerate(var_dims):
-                if dim_name == "time":
-                    time_idx = idx
-                # if time_idx > -1:
+        graph_template_path = os.path.join(
+            "data", "template_graph", f"{config.type}.pkl"
+        )
+        if os.path.exists(graph_template_path):
+            graph_template = pickle.load(open(graph_template_path, "rb"))
+        else:
+            graph_template = graphtype.GraphGridMesh(config)
 
-            # if "time" in var_dims:
+        graph = copy.deepcopy(graph_template)
+        graph.grid_node_feat = np.concatenate(
+            [stacked_inputs, graph.grid_node_feat], axis=-1
+        )
+        mesh_node_feat = np.zeros([graph.mesh_num_nodes, batch_dim, feat_dim])
+        graph.mesh_node_feat = np.concatenate(
+            [mesh_node_feat, graph.mesh_node_feat], axis=-1
+        )
 
-        return x
+        self.input_data.append(graph)
+        self.target_data.append(stacked_targets)
+
+    def __len__(self):
+        return len(self.input_data)
+
+    def __getitem__(self, idx):
+        return self.input_data[idx], self.target_data[idx]
+
+    def normalize(self, inputs_data, stddev_data, mean_data):
+        for name in list(inputs_data.keys()):
+            inputs_data[name] = (inputs_data[name] - mean_data[name]) / stddev_data[
+                name
+            ]
+        return inputs_data
+
+    def denormalize(self, inputs_data):
+        return inputs_data * self.stacked_targets_stddev + self.stacked_targets_mean
 
 
 if __name__ == "__main__":
-    from train_args import TrainingArguments
+    import json
 
-    config = TrainingArguments()
-    dataset = ERA5Data(config=config, data_type="train")
+    with open("config/GraphCast_small.json", "r") as f:
+        config = args.TrainingArguments(**json.load(f))
+    era5dataset = ERA5Data(config=config, data_type="train")

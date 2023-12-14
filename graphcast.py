@@ -1,7 +1,7 @@
 import paddle
 import paddle.nn as nn
 
-from data.graph import GraphGridMesh
+import graphtype
 
 
 class ResidualConnection(nn.Layer):
@@ -19,7 +19,7 @@ class GraphCastMLP(nn.Layer):
     ):
         super().__init__()
 
-        if latent_features == None:
+        if latent_features is None:
             latent_features = out_features
 
         self.mlp = nn.Sequential(
@@ -69,7 +69,7 @@ class GraphCastGNN(nn.Layer):
         self.edge_layer = GraphCastMLP(self.edge_in_dim, self.edge_out_dim)
         self.node_layer = GraphCastMLP(self.node_in_dim, self.node_out_dim)
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         if self.src == "mesh" and self.dst == "mesh":
             edge_feats = graph.mesh_edge_feat
             src_node_feats = graph.mesh_node_feat
@@ -95,16 +95,17 @@ class GraphCastGNN(nn.Layer):
         # 更新edge特征
         edge_feats_concat = paddle.concat(
             [
+                edge_feats,
                 paddle.gather(src_node_feats, src_idx),
                 paddle.gather(dst_node_feats, dst_idx),
-                edge_feats,
             ],
             axis=-1,
         )
         edge_feats_out = self.edge_layer(edge_feats_concat)
 
+        _, batch_dim, _ = edge_feats_out.shape
         # 更新node特征
-        edge_feats_scatter = paddle.zeros([dst_node_num, self.edge_out_dim])
+        edge_feats_scatter = paddle.zeros([dst_node_num, batch_dim, self.edge_out_dim])
         node_feats_concat = paddle.concat(
             [
                 dst_node_feats,
@@ -149,7 +150,7 @@ class GraphCastEmbedding(nn.Layer):
             config.mesh2grid_edge_dim, config.mesh2grid_edge_emb_dim
         )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         grid_node_emb = self.grid_node_embedding(graph.grid_node_feat)
         mesh_node_emb = self.mesh_node_embedding(graph.mesh_node_feat)
         mesh_edge_emb = self.mesh_edge_embedding(graph.mesh_edge_feat)
@@ -173,7 +174,7 @@ class GraphCastGrid2Mesh(paddle.nn.Layer):
             GraphCastMLP(config.grid_node_emb_dim, config.grid_node_emb_dim)
         )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.grid2mesh_gnn(graph)
         graph.grid_node_feat = self.grid_node_layer(graph.grid_node_feat)
         return graph
@@ -187,7 +188,7 @@ class GraphCastMesh2Grid(paddle.nn.Layer):
             GraphCastMLP(config.mesh_node_emb_dim, config.mesh_node_emb_dim)
         )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.mesh2grid_gnn(graph)
         graph.mesh_node_feat = self.mesh_node_layer(graph.mesh_node_feat)
         return graph
@@ -199,7 +200,7 @@ class GraphCastEncoder(nn.Layer):
         self.embedding = GraphCastEmbedding(config)
         self.grid2mesh_gnn = GraphCastGrid2Mesh(config)
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.embedding(graph)
         graph = self.grid2mesh_gnn(graph)
         return graph
@@ -216,7 +217,7 @@ class GraphCastDecoder(nn.Layer):
             layer_norm=False,
         )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.mesh2grid_gnn(graph)
         graph.grid_node_feat = self.grid_node_layer(graph.grid_node_feat)
         return graph
@@ -233,7 +234,7 @@ class GraphCastProcessor(nn.Layer):
                 GraphCastGNN(config, src_type="mesh", dst_type="mesh"),
             )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.processor(graph)
         return graph
 
@@ -248,6 +249,6 @@ class GraphCastNet(nn.Layer):
             ("decoder", GraphCastDecoder(config)),
         )
 
-    def forward(self, graph: GraphGridMesh):
+    def forward(self, graph: graphtype.GraphGridMesh):
         graph = self.graphcast(graph)
         return graph
