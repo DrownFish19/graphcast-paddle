@@ -9,6 +9,7 @@ import args
 import datasets
 import graphcast
 import graphtype
+import vis
 
 # isort: off
 from graphtype import GraphGridMesh  # noqa: F401
@@ -114,10 +115,44 @@ def eval():
     pred = dataset.denormalize(graph.grid_node_feat.numpy())
     pred = graph.grid_node_outputs_to_prediction(pred, dataset.targets_template)
     print(pred)
+    return (
+        graph.grid_node_outputs_to_prediction(
+            dataset.target_data[0], dataset.targets_template
+        ),
+        pred,
+    )
+
+
+def visualize(target, pred, variable_name, level, robust=True):
+    plot_size = 5
+    plot_max_steps = pred.dims["time"]
+
+    data = {
+        "Targets": vis.scale(
+            vis.select(target, variable_name, level, plot_max_steps), robust=robust
+        ),
+        "Predictions": vis.scale(
+            vis.select(pred, variable_name, level, plot_max_steps), robust=robust
+        ),
+        "Diff": vis.scale(
+            (
+                vis.select(target, variable_name, level, plot_max_steps)
+                - vis.select(pred, variable_name, level, plot_max_steps)
+            ),
+            robust=robust,
+            center=0,
+        ),
+    }
+    fig_title = variable_name
+    if "level" in pred[variable_name].coords:
+        fig_title += f" at {level} hPa"
+
+    vis.plot_data(data, fig_title, plot_size, robust)
 
 
 if __name__ == "__main__":
     convert_parameters()  # step.1
     make_graph_template()  # step.2
     test_datasets()  # step.3
-    eval()  # step.4
+    target, pred = eval()  # step.4
+    visualize(target, pred, "2m_temperature", level=50)
