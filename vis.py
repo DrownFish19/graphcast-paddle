@@ -4,6 +4,8 @@ from typing import Optional
 
 import IPython
 import matplotlib
+import matplotlib.animation as animation
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray
 
@@ -60,7 +62,7 @@ def plot_data(
 
     cols = min(cols, len(data))
     rows = math.ceil(len(data) / cols)
-    figure = matplotlib.pyplot.figure(figsize=(plot_size * 2 * cols, plot_size * rows))
+    figure = plt.figure(figsize=(plot_size * 2 * cols, plot_size * rows))
     figure.suptitle(fig_title, fontsize=16)
     figure.subplots_adjust(wspace=0, hspace=0)
     figure.tight_layout()
@@ -77,7 +79,7 @@ def plot_data(
             origin="lower",
             cmap=cmap,
         )
-        matplotlib.pyplot.colorbar(
+        plt.colorbar(
             mappable=im,
             ax=ax,
             orientation="vertical",
@@ -100,8 +102,8 @@ def plot_data(
         for im, (plot_data, norm, cmap) in zip(images, data.values()):
             im.set_data(plot_data.isel(time=frame, missing_dims="ignore"))
 
-    ani = matplotlib.animation.FuncAnimation(
+    ani = animation.FuncAnimation(
         fig=figure, func=update, frames=max_steps, interval=250
     )
-    matplotlib.pyplot.close(figure.number)
+    plt.close(figure.number)
     return IPython.display.HTML(ani.to_jshtml())
