@@ -2,12 +2,10 @@ import datetime
 import math
 from typing import Optional
 
+import IPython
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import xarray
-from IPython.display import HTML
-from matplotlib import animation
 
 
 def select(
@@ -62,7 +60,7 @@ def plot_data(
 
     cols = min(cols, len(data))
     rows = math.ceil(len(data) / cols)
-    figure = plt.figure(figsize=(plot_size * 2 * cols, plot_size * rows))
+    figure = matplotlib.pyplot.figure(figsize=(plot_size * 2 * cols, plot_size * rows))
     figure.suptitle(fig_title, fontsize=16)
     figure.subplots_adjust(wspace=0, hspace=0)
     figure.tight_layout()
@@ -79,7 +77,7 @@ def plot_data(
             origin="lower",
             cmap=cmap,
         )
-        plt.colorbar(
+        matplotlib.pyplot.colorbar(
             mappable=im,
             ax=ax,
             orientation="vertical",
@@ -102,8 +100,8 @@ def plot_data(
         for im, (plot_data, norm, cmap) in zip(images, data.values()):
             im.set_data(plot_data.isel(time=frame, missing_dims="ignore"))
 
-    ani = animation.FuncAnimation(
+    ani = matplotlib.animation.FuncAnimation(
         fig=figure, func=update, frames=max_steps, interval=250
     )
-    plt.close(figure.number)
-    return HTML(ani.to_jshtml())
+    matplotlib.pyplot.close(figure.number)
+    return IPython.display.HTML(ani.to_jshtml())
