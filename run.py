@@ -105,7 +105,7 @@ def test_datasets():
     print(era5dataset)
 
 
-def eval():
+def eval(output_diff=False):
     with open("config/GraphCast_small.json", "r") as f:
         config = args.TrainingArguments(**json.load(f))
     dataset = datasets.ERA5Data(config=config, data_type="train")
@@ -115,6 +115,35 @@ def eval():
     pred = dataset.denormalize(graph.grid_node_feat.numpy())
     pred = graph.grid_node_outputs_to_prediction(pred, dataset.targets_template)
     print(pred)
+
+    if output_diff:
+        jax_graphcast_small_pred = np.load("other/graphcast_small_output.npy").reshape(
+            181 * 360, 1, 83
+        )
+        jax_graphcast_small_pred = graph.grid_node_outputs_to_prediction(
+            jax_graphcast_small_pred, dataset.targets_template
+        )
+
+        paddle_graphcast_small_pred = pred
+
+        for var_name in list(pred):
+            diff_var = np.average(
+                jax_graphcast_small_pred[var_name].data
+                - paddle_graphcast_small_pred[var_name].data
+            )
+            print(var_name, f"diff is {diff_var}")
+
+        jax_graphcast_small_pred_np = datasets.dataset_to_stacked(
+            jax_graphcast_small_pred
+        )
+        paddle_graphcast_small_pred_np = datasets.dataset_to_stacked(
+            paddle_graphcast_small_pred
+        )
+        diff_all = np.average(
+            jax_graphcast_small_pred_np.data - paddle_graphcast_small_pred_np.data
+        )
+        print(f"All diff is {diff_all}")
+
     return (
         graph.grid_node_outputs_to_prediction(
             dataset.target_data[0], dataset.targets_template
@@ -154,5 +183,5 @@ if __name__ == "__main__":
     convert_parameters()  # step.1
     make_graph_template()  # step.2
     test_datasets()  # step.3
-    target, pred = eval()  # step.4
+    target, pred = eval(output_diff=True)  # step.4
     visualize(target, pred, "2m_temperature", level=50)
